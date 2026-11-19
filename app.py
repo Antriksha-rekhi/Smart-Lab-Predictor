@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
@@ -12,7 +13,7 @@ from flask import Flask, flash, g, redirect, render_template, request, url_for
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE = BASE_DIR / "campus_availability.db"
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "local-demo-key-change-me")
+app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 
 
 def get_db():
@@ -64,9 +65,22 @@ def initialize_database():
             time_slot TEXT NOT NULL,
             was_available INTEGER NOT NULL CHECK (was_available IN (0, 1))
         );
+        CREATE TABLE IF NOT EXISTS usage_records (
+            record_id INTEGER PRIMARY KEY,
+            computer_id INTEGER NOT NULL REFERENCES computers(id) ON DELETE CASCADE,
+            usage_date TEXT NOT NULL,
+            start_time TEXT NOT NULL,
+            end_time TEXT NOT NULL,
+            CHECK (start_time < end_time)
+        );
+        CREATE INDEX IF NOT EXISTS idx_sessions_space_day_time ON sessions(space_id,weekday,start_time,end_time);
+        CREATE INDEX IF NOT EXISTS idx_observations_space_time ON observations(space_id,time_slot,observed_on);
+        CREATE INDEX IF NOT EXISTS idx_usage_computer_date ON usage_records(computer_id,usage_date,start_time,end_time);
     """)
     if db.execute("SELECT COUNT(*) FROM spaces").fetchone()[0] == 0:
         seed_demo_data(db)
+    if db.execute("SELECT COUNT(*) FROM usage_records").fetchone()[0] == 0:
+        seed_demo_usage(db)
     db.commit()
     db.close()
 
@@ -110,6 +124,26 @@ def seed_demo_data(db):
                             ("09:00", "11:00", "13:00", "15:00")[slot_index], available))
 
 
+def seed_demo_usage(db):
+    """Add synthetic usage logs to the already seeded labs, including on existing installs."""
+    sample_usage = [
+        ("Computer Lab 1", "PC-01", "2026-09-07", "09:00", "10:00"),
+        ("Computer Lab 1", "PC-02", "2026-09-07", "10:00", "11:30"),
+        ("Computer Lab 1", "PC-04", "2026-09-08", "11:00", "12:00"),
+        ("Computer Lab 1", "PC-05", "2026-09-09", "13:00", "14:30"),
+        ("Computer Lab 2", "PC-01", "2026-09-07", "09:00", "11:00"),
+        ("Computer Lab 2", "PC-03", "2026-09-08", "13:00", "14:00"),
+        ("Computer Lab 2", "PC-04", "2026-09-10", "14:00", "15:30"),
+        ("Computer Lab 2", "PC-06", "2026-09-11", "10:00", "11:00"),
+    ]
+    computer_ids = {(row[0], row[1]): row[2] for row in db.execute(
+        "SELECT s.name,c.name,c.id FROM computers c JOIN spaces s ON s.id=c.space_id")}
+    data = [(computer_ids[(lab, computer)], day, start, end)
+            for lab, computer, day, start, end in sample_usage
+            if (lab, computer) in computer_ids]
+    db.executemany("INSERT INTO usage_records(computer_id,usage_date,start_time,end_time) VALUES(?,?,?,?)", data)
+
+
 def space_availability(space, weekday, slot):
     """Return current status, schedule conflicts, and historic empirical probability."""
     db = get_db()
@@ -149,14 +183,21 @@ def dashboard():
     rows = []
     for space in spaces:
         rows.append({"space": space, **space_availability(space, weekday, slot)})
+    eligible = [row for row in rows if row["current_available"]]
+    recommendation = max(eligible, key=lambda row: (
+        row["probability"] if row["probability"] is not None else -1,
+        row["available_computers"], row["space"]["capacity"])) if eligible else None
     computers = db.execute("SELECT * FROM computers ORDER BY space_id,name").fetchall()
     all_sets = {"available": set(), "occupied": set(), "maintenance": set()}
     for computer in computers:
         all_sets[computer["status"]].add(computer["id"])
     # These sets partition the universe of registered computers.
     counts = {status: len(items) for status, items in all_sets.items()}
+    peak_usage = db.execute("""SELECT substr(start_time,1,2) AS hour,COUNT(*) AS records
+        FROM usage_records GROUP BY hour ORDER BY records DESC,hour LIMIT 1""").fetchone()
     return render_template("dashboard.html", rows=rows, weekday=weekday, slot=slot,
                            counts=counts, total_computers=len(computers),
+                           recommendation=recommendation, peak_usage=peak_usage,
                            timeslots=["09:00", "11:00", "13:00", "15:00"],
                            weekdays=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"])
 
@@ -288,6 +329,47 @@ def manage_schedule():
     return render_template("schedule.html", spaces=spaces, sessions=sessions, weekdays=weekdays)
 
 
+@app.route("/usage", methods=["GET", "POST"])
+def usage_history():
+    db = get_db()
+    if request.method == "POST":
+        computer_id = request.form.get("computer_id", type=int)
+        usage_date = request.form.get("usage_date", "")
+        start_time = request.form.get("start_time", "")
+        end_time = request.form.get("end_time", "")
+        try:
+            date.fromisoformat(usage_date)
+            start = datetime.strptime(start_time, "%H:%M")
+            end = datetime.strptime(end_time, "%H:%M")
+            if start >= end:
+                raise ValueError
+            overlap = db.execute("""SELECT 1 FROM usage_records
+                WHERE computer_id=? AND usage_date=? AND start_time < ? AND end_time > ? LIMIT 1""",
+                                 (computer_id, usage_date, end_time, start_time)).fetchone()
+            if overlap:
+                flash("That computer already has a usage record overlapping this time.", "error")
+            else:
+                db.execute("""INSERT INTO usage_records(computer_id,usage_date,start_time,end_time)
+                    VALUES(?,?,?,?)""", (computer_id, usage_date, start_time, end_time))
+                db.commit()
+                flash("Usage record saved.", "success")
+        except (ValueError, TypeError, sqlite3.IntegrityError):
+            flash("Enter a valid computer, date, and end time later than the start time.", "error")
+        return redirect(url_for("usage_history"))
+    computers = db.execute("""SELECT c.id,c.name,s.name AS lab_name FROM computers c
+        JOIN spaces s ON s.id=c.space_id ORDER BY s.name,c.name""").fetchall()
+    records = db.execute("""SELECT u.*,c.name AS computer_name,s.name AS lab_name
+        FROM usage_records u JOIN computers c ON c.id=u.computer_id
+        JOIN spaces s ON s.id=c.space_id ORDER BY u.usage_date DESC,u.start_time DESC LIMIT 50""").fetchall()
+    usage_rows = []
+    for record in records:
+        start = datetime.strptime(record["start_time"], "%H:%M")
+        end = datetime.strptime(record["end_time"], "%H:%M")
+        usage_rows.append({**dict(record), "duration_minutes": int((end - start).total_seconds() // 60)})
+    return render_template("usage.html", computers=computers, records=usage_rows,
+                           today=date.today().isoformat())
+
+
 @app.route("/observations", methods=["GET", "POST"])
 def observations():
     db = get_db()
@@ -314,7 +396,6 @@ def observations():
                            today=date.today().isoformat(), timeslots=["09:00", "11:00", "13:00", "15:00"])
 
 
-initialize_database()
-
 if __name__ == "__main__":
+    initialize_database()
     app.run(debug=True)

@@ -1,0 +1,15 @@
+{% extends 'base.html' %}{% block title %}Usage log{% endblock %}{% block content %}
+<section class="page-title"><p class="eyebrow">COMPUTER USAGE TRACKING</p><h1>Record a lab session</h1><p>Save completed computer usage and see its duration. These records support the sample usage summary on the dashboard.</p></section>
+<section class="content-card"><form method="post" class="observation-form">
+  <label>Computer<select name="computer_id" required>{% for computer in computers %}<option value="{{ computer.id }}">{{ computer.lab_name }} · {{ computer.name }}</option>{% endfor %}</select></label>
+  <label>Date<input type="date" name="usage_date" value="{{ today }}" required></label>
+  <label>Start time<input type="time" name="start_time" required></label>
+  <label>End time<input type="time" name="end_time" required></label>
+  <button class="button">Save usage →</button>
+</form></section>
+<section class="section-heading" style="margin-top:28px"><div><p class="eyebrow">RECENT COMPUTER SESSIONS</p><h2>Usage history</h2></div></section>
+<div class="table-wrap"><table><thead><tr><th>Date</th><th>Laboratory</th><th>Computer</th><th>Time</th><th>Duration</th></tr></thead><tbody>
+{% for record in records %}<tr><td>{{ record.usage_date }}</td><td>{{ record.lab_name }}</td><td>{{ record.computer_name }}</td><td>{{ record.start_time }}–{{ record.end_time }}</td><td>{% set hours=record.duration_minutes//60 %}{% set minutes=record.duration_minutes%60 %}{% if hours %}{{ hours }}h {% endif %}{{ minutes }}m</td></tr>{% else %}<tr><td colspan="5">No usage records have been added.</td></tr>{% endfor %}
+</tbody></table></div>
+<p class="footnote">The app prevents overlapping records for the same computer on the same date. Usage logs are historical and do not automatically change the current status.</p>
+{% endblock %}

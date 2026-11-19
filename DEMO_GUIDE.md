@@ -15,7 +15,7 @@
 
 ### 2. Dashboard — 60 seconds
 
-Choose a day and time. Point out the scheduled-session result, the current lab computer count, and the historical availability estimate. Explain that timetable and current status are direct records, while the probability is based on past observations and is not a guarantee.
+Choose a day and time. Point out the scheduled-session result, the current lab computer count, the historical availability estimate, and the best currently eligible option. Explain that timetable and current status are direct records, while the probability is based on past observations and is not a guarantee.
 
 Useful seeded example: Computer Lab 1 has a Monday session from 10:00 to 12:00. Select Monday at 11:00 and show that it is scheduled. Select a time without a session to compare. The lab's computer count comes from the manually maintained statuses.
 
@@ -34,6 +34,8 @@ Open **Add observation** and show an observation as one recorded outcome for a s
 `P(available) = available observations / total observations`
 
 The dashboard shows both the percentage and the observation count. If there are no observations, it shows “No data” instead of dividing by zero.
+
+Open **Usage log** to show sample computer records and duration calculation. You can save a new record; the app rejects overlapping use for the same computer.
 
 ### 6. Close — 30 seconds
 

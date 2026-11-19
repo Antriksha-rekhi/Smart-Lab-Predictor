@@ -3,3 +3,4 @@ __pycache__/
 *.py[cod]
 campus_availability.db
 .env
+.DS_Store
