@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Campus Space{% endblock %} · Spacewise</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='manage.css') }}">
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="{{ url_for('dashboard') }}"><span class="brand-mark">S</span> Spacewise</a>
+    <nav><a href="{{ url_for('dashboard') }}">Availability</a><a href="{{ url_for('manage_spaces') }}">Manage spaces</a><a href="{{ url_for('manage_computers') }}">Manage computers</a><a href="{{ url_for('manage_schedule') }}">Timetable</a><a href="{{ url_for('set_explorer') }}">Set explorer</a><a href="{{ url_for('observations') }}">Add observation</a></nav>
+    <span class="demo-pill">DEMO DATA</span>
+  </header>
+  <main class="page">{% with messages = get_flashed_messages(with_categories=true) %}{% for category,message in messages %}<div class="notice {{ category }}">{{ message }}</div>{% endfor %}{% endwith %}{% block content %}{% endblock %}</main>
+  <footer>Spacewise · Classroom and computer lab availability · Historical estimates are not guarantees</footer>
+</body>
+</html>

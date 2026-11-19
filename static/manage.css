@@ -1,0 +1,4 @@
+.status-edit{display:flex;align-items:center;gap:8px}
+.status-edit select{height:34px;padding:0 9px;border:1px solid #e8edef;border-radius:7px;background:#fff;color:#172b35;font:11px 'DM Sans',sans-serif}
+.small-button{height:34px;padding:0 12px}
+@media(max-width:600px){.status-edit{flex-wrap:wrap}.table-wrap{overflow-x:auto}table{min-width:600px}}

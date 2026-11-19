@@ -1,0 +1,7 @@
+{% extends 'base.html' %}{% block title %}Manage computers{% endblock %}{% block content %}
+<section class="page-title"><p class="eyebrow">LAB STATUS MANAGEMENT</p><h1>Update computer status</h1><p>Set each lab computer to available, occupied, or under maintenance. The dashboard uses these statuses for its current lab counts.</p></section>
+<div class="table-wrap"><table><thead><tr><th>Laboratory</th><th>Computer</th><th>Current status</th><th>Update status</th></tr></thead><tbody>
+{% for computer in computers %}<tr><td>{{ computer.lab_name }}</td><td>{{ computer.name }}</td><td><span class="status-tag {% if computer.status=='available' %}free{% else %}busy{% endif %}">{{ computer.status|title }}</span></td><td><form method="post" class="status-edit"><input type="hidden" name="computer_id" value="{{ computer.id }}"><select name="status" aria-label="Status for {{ computer.name }}">{% for status in statuses %}<option value="{{ status }}" {% if status==computer.status %}selected{% endif %}>{{ status|title }}</option>{% endfor %}</select><button class="button small-button">Save</button></form></td></tr>{% endfor %}
+</tbody></table></div>
+<p class="footnote">These are manually maintained status records. They are not detected automatically by a sensor.</p>
+{% endblock %}

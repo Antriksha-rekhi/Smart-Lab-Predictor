@@ -1,0 +1,16 @@
+{% extends 'base.html' %}{% block title %}Timetable{% endblock %}{% block content %}
+<section class="page-title"><p class="eyebrow">SPACE SCHEDULES</p><h1>Manage the timetable</h1><p>Add recurring sessions for classrooms and computer labs. The dashboard uses these sessions to show when a space is scheduled.</p></section>
+<section class="content-card"><form method="post" class="observation-form">
+  <label>Space<select name="space_id" required>{% for space in spaces %}<option value="{{ space.id }}">{{ space.name }} · {{ space.kind|title }}</option>{% endfor %}</select></label>
+  <label>Day<select name="weekday">{% for day in range(7) %}<option value="{{ day }}">{{ weekdays[day] }}</option>{% endfor %}</select></label>
+  <label>Session title<input type="text" name="title" placeholder="e.g. Physics lecture" required maxlength="100"></label>
+  <label>Start time<input type="time" name="start_time" required></label>
+  <label>End time<input type="time" name="end_time" required></label>
+  <button class="button">Add session →</button>
+</form></section>
+<section class="section-heading" style="margin-top:28px"><div><p class="eyebrow">SAVED SESSIONS</p><h2>Weekly timetable</h2></div></section>
+<div class="table-wrap"><table><thead><tr><th>Day</th><th>Time</th><th>Space</th><th>Session</th></tr></thead><tbody>
+{% for session in sessions %}<tr><td>{{ weekdays[session.weekday] }}</td><td>{{ session.start_time }}–{{ session.end_time }}</td><td>{{ session.space_name }}</td><td>{{ session.title }}</td></tr>{% else %}<tr><td colspan="4">No sessions added.</td></tr>{% endfor %}
+</tbody></table></div>
+<p class="footnote">If a new session overlaps an existing session for the same space and day, the app rejects it. Sessions in different spaces may overlap.</p>
+{% endblock %}
