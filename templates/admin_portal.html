@@ -1,0 +1,23 @@
+{% extends 'base.html' %}{% block title %}Admin portal{% endblock %}{% block content %}
+<section class="page-title"><p class="eyebrow">AUTHORIZED STAFF</p><h1>Computer status admin</h1><p>Mark lab computers available, in use, or under maintenance. Changes update the data used by Availability.</p></section>
+<section class="content-card admin-card">
+  {% if not admin_authenticated %}
+    <h2>Admin sign in</h2>
+    {% if admin_configured %}
+      <form method="post" class="admin-login-form"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="login"><label>Admin password<input type="password" name="password" autocomplete="current-password" required autofocus></label><button class="button">Sign in →</button></form>
+    {% elif local_demo_mode %}
+      <form method="post" class="local-demo-admin-form"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="demo_login"><button class="button">Open local demo admin →</button></form>
+      <p class="admin-setup-note"><strong>Presentation mode only:</strong> anyone using this local app can open the demo admin. Do not expose this mode on a public server.</p>
+    {% else %}
+      <p class="admin-setup-note"><strong>Admin access is not configured yet.</strong> Set a private <code>ADMIN_PASSWORD</code> environment variable, then restart Spacewise. Do not commit the password to the project or share it in chat.</p>
+    {% endif %}
+  {% else %}
+    {% if admin_demo %}<p class="demo-auth-note"><strong>LOCAL DEMO ADMIN:</strong> status changes are saved locally for presentation. This is not secure admin authentication.</p>{% endif %}
+    <div class="admin-heading"><div><p class="eyebrow">ADMIN SESSION</p><h2>Lab computers</h2></div><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="logout"><button class="button secondary-button">Sign out</button></form></div>
+    <div class="table-wrap"><table><thead><tr><th>Laboratory</th><th>Computer</th><th>Current status</th><th>Set status</th></tr></thead><tbody>
+      {% for computer in computers %}<tr><td>{{ computer.lab_name }}</td><td>{{ computer.name }} <small class="table-note">ID {{ computer.id }}</small></td><td><span class="status-tag {% if computer.effective_status=='available' %}free{% elif computer.effective_status=='unknown' %}unknown{% else %}busy{% endif %}">{{ computer.effective_status|title }}</span></td><td><form method="post" class="status-edit"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="update"><input type="hidden" name="computer_id" value="{{ computer.id }}"><select name="status" aria-label="Status for {{ computer.name }}"><option value="available" {% if computer.status=='available' %}selected{% endif %}>Available</option><option value="occupied" {% if computer.status=='occupied' %}selected{% endif %}>In use</option><option value="maintenance" {% if computer.status=='maintenance' %}selected{% endif %}>Under maintenance</option></select><button class="button small-button">Save</button></form></td></tr>{% else %}<tr><td colspan="4">No lab computers are registered yet.</td></tr>{% endfor %}
+    </tbody></table></div>
+    <p class="footnote">Manual admin status takes effect immediately. A computer under maintenance is protected from collector updates until an admin changes it back.</p>
+  {% endif %}
+</section>
+{% endblock %}

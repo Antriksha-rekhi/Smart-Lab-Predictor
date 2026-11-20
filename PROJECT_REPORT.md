@@ -2,7 +2,7 @@
 
 ## Abstract
 
-Spacewise is a local web application that helps students check classroom timetable availability and the current status of computers in campus laboratories. It combines timetable records, manually maintained computer status, usage history, and historical availability observations. Set theory is used to classify computers, empirical discrete probability estimates availability for a selected weekday and time, and database relations connect spaces to computers, timetable sessions, observations, and usage records. The application uses Python, Flask, and SQLite; it does not train a machine-learning model. All included records are synthetic demonstration data.
+Spacewise is a local web application that helps students check classroom timetable availability and the current status of computers in campus laboratories. It combines timetable records, manually maintained computer status, usage history, and historical availability observations. Set theory is used to classify computers, empirical discrete probability estimates availability for a selected weekday and time, and database relations connect spaces to computers, timetable sessions, observations, and usage records. The application uses Python, Flask, SQLite, pandas, NumPy, and SimPy; it does not train a machine-learning model. All included records are synthetic demonstration data.
 
 ## 1. Introduction
 
@@ -40,9 +40,10 @@ Campus space information may be spread across timetables and informal updates. W
 - Python 3
 - Flask
 - SQLite via Python's built-in `sqlite3` module
+- pandas for grouping historical observations and simulation runs
+- NumPy for reproducible random inter-arrival and usage-duration samples
+- SimPy for modeling student requests and computer queues as a discrete-event system
 - HTML and CSS templates rendered by Flask
-
-NumPy, pandas, Chart.js, and machine-learning libraries are not required by this implementation.
 
 ## 6. System architecture
 
@@ -140,16 +141,24 @@ The database relation `Computer(space_id, ...)` associates each computer with on
 - **Availability dashboard:** filters by weekday and time, checks sessions and current lab statuses, shows historical probability, and ranks currently eligible spaces.
 - **Space management:** adds classrooms and labs; new lab computers are created with an available status.
 - **Computer management:** changes a computer's current status.
+- **Admin portal:** administrators set lab computers to available, occupied, or under maintenance; students cannot make these status changes. A real local admin password can be configured, while the `python app.py` presentation mode offers an explicitly labeled local demo-admin entry.
 - **Timetable:** adds recurring weekly sessions and rejects overlaps for the same space and day.
 - **Usage log:** records computer, date, and start/end time; calculates duration and prevents overlapping records for the same computer and date.
 - **Set explorer:** performs status-set operations.
 - **Observation form:** records whether a space was available at a date and time.
+- **Lab simulator:** uses current reported lab capacity and user-entered assumptions to simulate student arrivals, computer use, and queue waits over repeated runs.
 
-## 10. Recommendation logic
+## 10. Library use and simulation assumptions
+
+The dashboard loads historical observations into a pandas DataFrame and filters by weekday and time to calculate the empirical fraction of available observations. For simulation, NumPy's random number generator samples exponential gaps between student arrivals and exponential computer-use durations. Their average values are entered by the user; the exponential distribution is a modeling assumption, not a measurement guaranteed by the existing demo data. SimPy represents each currently free computer as one unit of a shared resource. Each simulated student requests a computer, waits if all resources are busy, uses it for the sampled duration, and releases it. The simulation repeats with reproducible random seeds; pandas summarizes the runs using average wait, average number of arrivals, queue rate, and a 95th percentile of per-run maximum waits.
+
+This illustrates probability distributions, averages, resources, event sequencing, and repeated trials. It is a what-if model only: it neither changes real computer status nor reserves computers, and its outputs should not be presented as real campus predictions until assumptions are calibrated with observed arrival and session data.
+
+## 11. Recommendation logic
 
 The dashboard first excludes spaces with a timetable session at the selected slot. A lab also needs at least one computer currently marked available. Among the eligible spaces, the app ranks by historical empirical probability; if probabilities are tied or absent, it uses available lab computer count and space capacity as tie-breakers. The recommended option is still subject to manual data accuracy and is not a reservation.
 
-## 11. Testing and results
+## 12. Testing and results
 
 On 19 November 2026, the project was checked with Python 3.14 and Flask's in-process client using a temporary, isolated SQLite database. The automated suite is in `tests/test_app.py` and can be run with `python -m unittest discover -s tests -v`.
 
@@ -157,7 +166,7 @@ All seven automated tests passed. They checked page rendering and seed counts; s
 
 These are functional checks on an isolated database, not a guarantee about every deployment. Before submission, capture screenshots from the running local app for the dashboard, Set explorer, and one data-entry page. Keep synthetic data clearly identified as demonstration data.
 
-## 12. Limitations
+## 13. Limitations
 
 - Included records are synthetic and must not be presented as actual campus records.
 - Computer status is entered manually; there are no sensors or automatic occupancy updates.
@@ -166,7 +175,7 @@ These are functional checks on an isolated database, not a guarantee about every
 - Probability quality depends on the number and accuracy of recorded observations.
 - The application is a local classroom prototype and has no user accounts, role management, or booking system.
 
-## 13. Future scope
+## 14. Future scope
 
 - Import official timetable data after obtaining an approved data source.
 - Add user login and administrator/student roles.
@@ -174,11 +183,11 @@ These are functional checks on an isolated database, not a guarantee about every
 - Integrate sensors only if the institution provides approved hardware and data access.
 - Collect more verified observations and compare probability estimates over time.
 
-## 14. Conclusion
+## 15. Conclusion
 
 Spacewise demonstrates how Python and discrete mathematics can support a practical campus availability prototype. Set operations classify lab computers, empirical probability summarizes past availability for a selected day and time, and SQLite relations connect the project's entities. The app distinguishes current schedule/status records from historical estimates and identifies the limitations of manually maintained sample data.
 
-## 15. Group contribution plan
+## 16. Group contribution plan
 
 Use this as a planning split, then replace it with the work each person actually performs and understands:
 
@@ -187,7 +196,7 @@ Use this as a planning split, then replace it with the work each person actually
 3. Timetable, usage records, and conflict handling.
 4. Probability observations, dashboard interpretation, and report integration.
 
-## 16. References
+## 17. References
 
 - Python Software Foundation. *Python 3 Documentation: Set Types*. https://docs.python.org/3/library/stdtypes.html#set-types-set-frozenset
 - Pallets Projects. *Flask 3.1 Quickstart*. https://flask.palletsprojects.com/en/stable/quickstart/

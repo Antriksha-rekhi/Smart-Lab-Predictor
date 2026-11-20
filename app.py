@@ -5,15 +5,56 @@ from __future__ import annotations
 import os
 import secrets
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from hmac import compare_digest
 
-from flask import Flask, flash, g, redirect, render_template, request, url_for
+from flask import Flask, flash, g, redirect, render_template, request, session, url_for
+
+try:
+    import numpy as np
+except ImportError:
+    np = None
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+try:
+    import simpy
+except ImportError:
+    simpy = None
+
+try:
+    from authlib.integrations.flask_client import OAuth
+except ImportError:
+    OAuth = None
 
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE = BASE_DIR / "campus_availability.db"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+app.config["LOCAL_DEMO_MODE"] = os.environ.get(
+    "SPACEWISE_DEMO_MODE", "1" if __name__ == "__main__" else "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+STUDENT_EMAIL_DOMAIN = os.environ.get("STUDENT_EMAIL_DOMAIN", "it.vjti.ac.in").strip().lower().lstrip("@")
+oauth = OAuth(app) if OAuth else None
+
+if oauth:
+    oauth.register(
+        name="google",
+        client_id=os.environ.get("GOOGLE_CLIENT_ID"),
+        client_secret=os.environ.get("GOOGLE_CLIENT_SECRET"),
+        server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+        client_kwargs={"scope": "openid email profile"},
+    )
+    microsoft_tenant = os.environ.get("MICROSOFT_TENANT_ID", "organizations")
+    oauth.register(
+        name="microsoft",
+        client_id=os.environ.get("MICROSOFT_CLIENT_ID"),
+        client_secret=os.environ.get("MICROSOFT_CLIENT_SECRET"),
+        server_metadata_url=f"https://login.microsoftonline.com/{microsoft_tenant}/v2.0/.well-known/openid-configuration",
+        client_kwargs={"scope": "openid email profile"},
+    )
 
 
 def get_db():
@@ -29,6 +70,21 @@ def close_db(_error=None):
     db = g.pop("db", None)
     if db is not None:
         db.close()
+
+
+@app.before_request
+def require_student_sign_in():
+    """Send visitors to college sign-in before rendering protected app pages."""
+    public_endpoints = {
+        "static", "student_login", "student_login_start", "student_login_callback",
+        "student_logout", "student_demo_login", "receive_computer_status", "admin_portal",
+    }
+    if request.endpoint == "manage_computers" and not session.get("admin_authenticated"):
+        flash("Computer status changes are available to administrators only.", "error")
+        return redirect(url_for("admin_portal"))
+    if (request.endpoint not in public_endpoints and not session.get("student_profile")
+            and not session.get("admin_authenticated")):
+        return redirect(url_for("student_login", next=request.full_path.rstrip("?")))
 
 
 def initialize_database():
@@ -77,12 +133,32 @@ def initialize_database():
         CREATE INDEX IF NOT EXISTS idx_observations_space_time ON observations(space_id,time_slot,observed_on);
         CREATE INDEX IF NOT EXISTS idx_usage_computer_date ON usage_records(computer_id,usage_date,start_time,end_time);
     """)
+    # Add heartbeat metadata to databases created by earlier versions.
+    computer_columns = {row[1] for row in db.execute("PRAGMA table_info(computers)")}
+    if "last_seen_at" not in computer_columns:
+        db.execute("ALTER TABLE computers ADD COLUMN last_seen_at TEXT")
+    if "status_source" not in computer_columns:
+        db.execute("ALTER TABLE computers ADD COLUMN status_source TEXT NOT NULL DEFAULT 'manual'")
     if db.execute("SELECT COUNT(*) FROM spaces").fetchone()[0] == 0:
         seed_demo_data(db)
     if db.execute("SELECT COUNT(*) FROM usage_records").fetchone()[0] == 0:
         seed_demo_usage(db)
     db.commit()
     db.close()
+
+
+def effective_computer_status(computer, now=None):
+    """Hide stale collector values rather than claiming an offline PC is free."""
+    if computer["status_source"] != "collector":
+        return computer["status"]
+    try:
+        last_seen = datetime.fromisoformat(computer["last_seen_at"])
+    except (TypeError, ValueError):
+        return "unknown"
+    now = now or datetime.now(timezone.utc)
+    if last_seen.tzinfo is None:
+        last_seen = last_seen.replace(tzinfo=timezone.utc)
+    return computer["status"] if now - last_seen <= timedelta(seconds=90) else "unknown"
 
 
 def seed_demo_data(db):
@@ -151,26 +227,43 @@ def space_availability(space, weekday, slot):
     occupied_session = db.execute("""SELECT title FROM sessions
         WHERE space_id=? AND weekday=? AND start_time<=? AND end_time>? LIMIT 1""",
         (space_id, weekday, slot, slot)).fetchone()
-    computers = db.execute("SELECT status FROM computers WHERE space_id=?", (space_id,)).fetchall()
-    available_computers = sum(row["status"] == "available" for row in computers)
+    computers = db.execute("SELECT status,status_source,last_seen_at FROM computers WHERE space_id=?",
+                           (space_id,)).fetchall()
+    computer_statuses = [effective_computer_status(row) for row in computers]
+    available_computers = sum(status == "available" for status in computer_statuses)
     if space["kind"] == "lab":
         current_available = available_computers > 0 and occupied_session is None
     else:
         current_available = occupied_session is None
     # Python weekdays use Monday=0; SQLite strftime('%w') uses Sunday=0.
     sqlite_weekday = (weekday + 1) % 7
-    hist = db.execute("""SELECT COUNT(*) AS total, COALESCE(SUM(was_available),0) AS yes
-        FROM observations WHERE space_id=? AND time_slot=?
-        AND CAST(strftime('%w', observed_on) AS INTEGER)=?""",
-        (space_id, slot, sqlite_weekday)).fetchone()
-    probability = hist["yes"] / hist["total"] if hist["total"] else None
+    if pd is not None:
+        historical_rows = db.execute(
+            "SELECT observed_on,time_slot,was_available FROM observations WHERE space_id=?",
+            (space_id,),
+        ).fetchall()
+        history = pd.DataFrame([dict(row) for row in historical_rows])
+        if history.empty:
+            total, yes = 0, 0
+        else:
+            history["weekday"] = pd.to_datetime(history["observed_on"]).dt.weekday
+            matching = history[(history["weekday"] == weekday) & (history["time_slot"] == slot)]
+            total, yes = int(len(matching)), int(matching["was_available"].sum())
+    else:
+        hist = db.execute("""SELECT COUNT(*) AS total, COALESCE(SUM(was_available),0) AS yes
+            FROM observations WHERE space_id=? AND time_slot=?
+            AND CAST(strftime('%w', observed_on) AS INTEGER)=?""",
+            (space_id, slot, sqlite_weekday)).fetchone()
+        total, yes = hist["total"], hist["yes"]
+    probability = yes / total if total else None
     return {
         "current_available": current_available,
         "session": occupied_session["title"] if occupied_session else None,
         "available_computers": available_computers,
         "total_computers": len(computers),
+        "unknown_computers": sum(status == "unknown" for status in computer_statuses),
         "probability": probability,
-        "observations": hist["total"],
+        "observations": total,
     }
 
 
@@ -180,36 +273,145 @@ def dashboard():
     spaces = db.execute("SELECT * FROM spaces ORDER BY kind DESC,name").fetchall()
     weekday = request.args.get("weekday", default=datetime.now().weekday(), type=int)
     slot = request.args.get("slot", default="11:00")
+    # Availability can be checked at any minute during campus hours.
+    try:
+        parsed_slot = datetime.strptime(slot, "%H:%M").time()
+        if not datetime.strptime("07:00", "%H:%M").time() <= parsed_slot <= datetime.strptime("22:00", "%H:%M").time():
+            raise ValueError
+    except ValueError:
+        slot = "11:00"
     rows = []
     for space in spaces:
         rows.append({"space": space, **space_availability(space, weekday, slot)})
     eligible = [row for row in rows if row["current_available"]]
     recommendation = max(eligible, key=lambda row: (
         row["probability"] if row["probability"] is not None else -1,
-        row["available_computers"], row["space"]["capacity"])) if eligible else None
+        row["available_computers"])) if eligible else None
     computers = db.execute("SELECT * FROM computers ORDER BY space_id,name").fetchall()
-    all_sets = {"available": set(), "occupied": set(), "maintenance": set()}
+    all_sets = {"available": set(), "occupied": set(), "maintenance": set(), "unknown": set()}
     for computer in computers:
-        all_sets[computer["status"]].add(computer["id"])
+        all_sets[effective_computer_status(computer)].add(computer["id"])
     # These sets partition the universe of registered computers.
     counts = {status: len(items) for status, items in all_sets.items()}
-    peak_usage = db.execute("""SELECT substr(start_time,1,2) AS hour,COUNT(*) AS records
-        FROM usage_records GROUP BY hour ORDER BY records DESC,hour LIMIT 1""").fetchone()
     return render_template("dashboard.html", rows=rows, weekday=weekday, slot=slot,
                            counts=counts, total_computers=len(computers),
-                           recommendation=recommendation, peak_usage=peak_usage,
-                           timeslots=["09:00", "11:00", "13:00", "15:00"],
+                           recommendation=recommendation,
                            weekdays=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"])
+
+
+def simulate_lab_queue(computer_count, arrivals_per_hour, average_session_minutes,
+                       simulation_minutes, replications):
+    """Run a reproducible M/M/c-style queue simulation with SimPy and NumPy."""
+    replications_data = []
+    for replication in range(replications):
+        rng = np.random.default_rng(2026 + replication)
+        environment = simpy.Environment()
+        computers = simpy.Resource(environment, capacity=computer_count)
+        wait_times = []
+
+        def student_request():
+            arrived_at = environment.now
+            with computers.request() as request_event:
+                yield request_event
+                wait_times.append(environment.now - arrived_at)
+                duration = max(0.1, float(rng.exponential(average_session_minutes)))
+                yield environment.timeout(duration)
+
+        def arrivals():
+            while True:
+                gap = float(rng.exponential(60 / arrivals_per_hour))
+                yield environment.timeout(gap)
+                if environment.now >= simulation_minutes:
+                    return
+                environment.process(student_request())
+
+        environment.process(arrivals())
+        environment.run()
+        replications_data.append({
+            "requests": len(wait_times),
+            "average_wait": float(np.mean(wait_times)) if wait_times else 0.0,
+            "queue_rate": (sum(wait > 0.01 for wait in wait_times) / len(wait_times)) if wait_times else 0.0,
+            "longest_wait": max(wait_times, default=0.0),
+        })
+
+    results = pd.DataFrame(replications_data)
+    return {
+        "average_requests": float(results["requests"].mean()),
+        "average_wait": float(results["average_wait"].mean()),
+        "queue_rate": float(results["queue_rate"].mean()),
+        "p95_wait": float(results["longest_wait"].quantile(0.95)),
+        "replications": replications,
+    }
+
+
+@app.route("/simulation", methods=["GET", "POST"])
+def lab_simulator():
+    db = get_db()
+    labs = db.execute("SELECT * FROM spaces WHERE kind='lab' ORDER BY name").fetchall()
+    weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    def int_value(field, default):
+        raw_value = request.values.get(field)
+        if raw_value is None or raw_value == "":
+            return default
+        try:
+            return int(raw_value)
+        except ValueError:
+            return None
+
+    values = {
+        "lab_id": int_value("lab_id", labs[0]["id"] if labs else 0),
+        "weekday": int_value("weekday", datetime.now().weekday()),
+        "slot": request.values.get("slot", "11:00"),
+        "arrivals_per_hour": int_value("arrivals_per_hour", 18),
+        "average_session_minutes": int_value("average_session_minutes", 30),
+        "simulation_minutes": int_value("simulation_minutes", 60),
+        "replications": int_value("replications", 100),
+    }
+    selected_lab = next((lab for lab in labs if lab["id"] == values["lab_id"]), None)
+    capacity = 0
+    analysis = None
+    error = None
+    if selected_lab:
+        try:
+            datetime.strptime(values["slot"], "%H:%M")
+            slot_valid = True
+        except (TypeError, ValueError):
+            slot_valid = False
+        if slot_valid and 0 <= values["weekday"] <= 6:
+            availability = space_availability(selected_lab, values["weekday"], values["slot"])
+            capacity = availability["available_computers"] if not availability["session"] else 0
+    if request.method == "POST":
+        if np is None or pd is None or simpy is None:
+            error = "Install the project libraries with: pip install -r requirements.txt"
+        elif (not selected_lab or values["weekday"] is None or not 0 <= values["weekday"] <= 6 or not slot_valid
+              or any(values[field] is None for field in ("arrivals_per_hour", "average_session_minutes", "simulation_minutes", "replications"))
+              or not 1 <= values["arrivals_per_hour"] <= 60
+              or not 5 <= values["average_session_minutes"] <= 180
+              or not 30 <= values["simulation_minutes"] <= 240
+              or not 10 <= values["replications"] <= 200):
+            error = "Choose a lab and keep each value within the limits shown on the form."
+        elif capacity <= 0:
+            error = "No computers are currently reported available for this lab and time. Update its status or choose another lab/time."
+        else:
+            analysis = simulate_lab_queue(
+                capacity, values["arrivals_per_hour"], values["average_session_minutes"],
+                values["simulation_minutes"], values["replications"],
+            )
+    dependencies_ready = np is not None and pd is not None and simpy is not None
+    return render_template("simulation.html", labs=labs, weekdays=weekdays, values=values,
+                           selected_lab=selected_lab, capacity=capacity, analysis=analysis,
+                           error=error, dependencies_ready=dependencies_ready)
 
 
 @app.route("/sets")
 def set_explorer():
     db = get_db()
-    computer_rows = db.execute("""SELECT c.id,c.name,c.status,s.name AS lab_name
+    computer_rows = db.execute("""SELECT c.id,c.name,c.status,c.status_source,c.last_seen_at,s.name AS lab_name
         FROM computers c JOIN spaces s ON s.id=c.space_id ORDER BY s.name,c.name""").fetchall()
     # Use primary keys as set elements: computer names such as PC-01 repeat across labs.
-    statuses = {name: {row["id"] for row in computer_rows if row["status"] == name}
-                for name in ("available", "occupied", "maintenance")}
+    statuses = {name: {row["id"] for row in computer_rows
+                       if effective_computer_status(row) == name}
+                for name in ("available", "occupied", "maintenance", "unknown")}
     labels = {row["id"]: f"{row['lab_name']} · {row['name']}" for row in computer_rows}
     selected = request.args.get("status", "available")
     selected = selected if selected in statuses else "available"
@@ -247,18 +449,217 @@ def manage_computers():
         if status not in allowed_statuses:
             flash("Choose a valid computer status.", "error")
         else:
-            cursor = db.execute("UPDATE computers SET status=? WHERE id=?", (status, computer_id))
+            cursor = db.execute("UPDATE computers SET status=?,status_source='manual',last_seen_at=NULL WHERE id=?",
+                                (status, computer_id))
             if cursor.rowcount:
                 db.commit()
                 flash("Computer status updated.", "success")
             else:
                 flash("Computer not found.", "error")
         return redirect(url_for("manage_computers"))
-    computers = db.execute("""SELECT c.id,c.name,c.status,s.name AS lab_name
+    computer_rows = db.execute("""SELECT c.id,c.name,c.status,c.status_source,c.last_seen_at,s.name AS lab_name
         FROM computers c JOIN spaces s ON s.id=c.space_id
         WHERE s.kind='lab' ORDER BY s.name,c.name""").fetchall()
+    computers = []
+    for row in computer_rows:
+        item = dict(row)
+        item["effective_status"] = effective_computer_status(row)
+        item["source_label"] = "Automatic collector" if row["status_source"] == "collector" else "Manual update"
+        computers.append(item)
     return render_template("computers.html", computers=computers,
                            statuses=["available", "occupied", "maintenance"])
+
+
+@app.route("/admin", methods=["GET", "POST"])
+def admin_portal():
+    db = get_db()
+    configured_password = os.environ.get("ADMIN_PASSWORD", "")
+    csrf_token = session.setdefault("admin_csrf_token", secrets.token_urlsafe(32))
+    if request.method == "POST":
+        if not compare_digest(request.form.get("csrf_token", ""), csrf_token):
+            flash("The form expired. Reload the admin page and try again.", "error")
+            return redirect(url_for("admin_portal"))
+        action = request.form.get("action")
+        if action == "login":
+            submitted_password = request.form.get("password", "")
+            if not configured_password:
+                flash("Admin access is not configured. Set ADMIN_PASSWORD before starting the app.", "error")
+            elif compare_digest(submitted_password, configured_password):
+                session["admin_authenticated"] = True
+                session["admin_csrf_token"] = secrets.token_urlsafe(32)
+                flash("Admin access granted.", "success")
+            else:
+                flash("Incorrect admin password.", "error")
+            return redirect(url_for("admin_portal"))
+
+        if action == "demo_login":
+            if app.config["LOCAL_DEMO_MODE"] and not configured_password:
+                session["admin_authenticated"] = True
+                session["admin_demo"] = True
+                session["admin_csrf_token"] = secrets.token_urlsafe(32)
+                flash("Local demo admin session started. Status changes are saved in the demo database.", "success")
+            else:
+                flash("Local demo admin sign-in is disabled when deployed or when an admin password is configured.", "error")
+            return redirect(url_for("admin_portal"))
+
+        if action == "logout":
+            session.pop("admin_authenticated", None)
+            session.pop("admin_demo", None)
+            session["admin_csrf_token"] = secrets.token_urlsafe(32)
+            flash("Admin signed out.", "success")
+            return redirect(url_for("admin_portal"))
+
+        if not session.get("admin_authenticated"):
+            flash("Sign in as an administrator first.", "error")
+            return redirect(url_for("admin_portal"))
+        computer_id = request.form.get("computer_id", type=int)
+        status = request.form.get("status", "")
+        if status not in {"available", "occupied", "maintenance"}:
+            flash("Choose Available, In use, or Under maintenance.", "error")
+        else:
+            cursor = db.execute("""UPDATE computers SET status=?,status_source='manual',last_seen_at=NULL
+                WHERE id=? AND space_id IN (SELECT id FROM spaces WHERE kind='lab')""",
+                (status, computer_id))
+            if cursor.rowcount:
+                db.commit()
+                flash("Computer status saved. The change appears on Availability.", "success")
+            else:
+                flash("Lab computer not found.", "error")
+        return redirect(url_for("admin_portal"))
+
+    computer_rows = db.execute("""SELECT c.id,c.name,c.status,c.status_source,c.last_seen_at,
+        s.name AS lab_name FROM computers c JOIN spaces s ON s.id=c.space_id
+        WHERE s.kind='lab' ORDER BY s.name,c.name""").fetchall()
+    computers = [dict(row, effective_status=effective_computer_status(row)) for row in computer_rows]
+    return render_template("admin_portal.html", computers=computers,
+                           admin_authenticated=session.get("admin_authenticated", False),
+                           admin_configured=bool(configured_password),
+                           local_demo_mode=app.config["LOCAL_DEMO_MODE"],
+                           admin_demo=session.get("admin_demo", False), csrf_token=csrf_token)
+
+
+@app.route("/api/computer-status", methods=["POST"])
+def receive_computer_status():
+    """Receive a minimal status heartbeat from an authorized lab collector."""
+    expected_token = os.environ.get("COMPUTER_STATUS_TOKEN", "")
+    supplied_token = request.headers.get("Authorization", "")
+    if not expected_token or not compare_digest(supplied_token, f"Bearer {expected_token}"):
+        return {"error": "Collector authentication is not configured or is invalid."}, 401
+    payload = request.get_json(silent=True) or {}
+    computer_id = payload.get("computer_id")
+    status = payload.get("status")
+    if isinstance(computer_id, bool) or not isinstance(computer_id, int) or computer_id < 1:
+        return {"error": "computer_id must be a positive integer."}, 400
+    if status not in {"available", "occupied"}:
+        return {"error": "status must be available or occupied."}, 400
+    db = get_db()
+    computer = db.execute("""SELECT c.id,c.status,s.kind FROM computers c
+        JOIN spaces s ON s.id=c.space_id WHERE c.id=?""", (computer_id,)).fetchone()
+    if not computer or computer["kind"] != "lab":
+        return {"error": "Lab computer not found."}, 404
+    last_seen = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if computer["status"] == "maintenance":
+        db.execute("UPDATE computers SET last_seen_at=? WHERE id=?", (last_seen, computer_id))
+        effective_status = "maintenance"
+    else:
+        db.execute("""UPDATE computers SET status=?,status_source='collector',last_seen_at=?
+            WHERE id=?""", (status, last_seen, computer_id))
+        effective_status = status
+    db.commit()
+    return {"ok": True, "computer_id": computer_id, "status": effective_status,
+            "last_seen_at": last_seen}, 200
+
+
+@app.route("/student-login")
+def student_login():
+    """Offer real college SSO and a visibly unverified local presentation sign-in."""
+    return render_template(
+        "student_login.html",
+        student=session.get("student_profile"),
+        email_domain=STUDENT_EMAIL_DOMAIN,
+        local_demo_mode=app.config["LOCAL_DEMO_MODE"],
+        authlib_available=oauth is not None,
+        google_ready=bool(os.environ.get("GOOGLE_CLIENT_ID") and os.environ.get("GOOGLE_CLIENT_SECRET")),
+        microsoft_ready=bool(os.environ.get("MICROSOFT_CLIENT_ID") and os.environ.get("MICROSOFT_CLIENT_SECRET")),
+    )
+
+
+@app.route("/student-demo-login", methods=["POST"])
+def student_demo_login():
+    if not app.config["LOCAL_DEMO_MODE"]:
+        return "Local demo sign-in is disabled.", 404
+    name = request.form.get("name", "").strip()
+    registration_id = request.form.get("registration_id", "").strip()
+    email = request.form.get("college_email", "").strip().lower()
+    if (not name or len(name) > 100 or not registration_id or len(registration_id) > 40
+            or len(email) > 254 or "@" not in email
+            or email.rsplit("@", 1)[1] != STUDENT_EMAIL_DOMAIN):
+        flash(f"Enter your name, registration ID, and a college email ending in @{STUDENT_EMAIL_DOMAIN}.", "error")
+        return redirect(url_for("student_login"))
+    session.clear()
+    session["student_profile"] = {
+        "name": name,
+        "registration_id": registration_id,
+        "college_email": email,
+        "provider": "local demo",
+        "verified": False,
+    }
+    flash("Demo student session started. The details were not verified.", "success")
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/student-login/<provider>")
+def student_login_start(provider):
+    if provider not in {"google", "microsoft"}:
+        return "Unknown sign-in provider.", 404
+    if oauth is None:
+        flash("Google/Microsoft sign-in needs Authlib. Install the project requirements first.", "error")
+        return redirect(url_for("student_login"))
+    if not (os.environ.get(f"{provider.upper()}_CLIENT_ID")
+            and os.environ.get(f"{provider.upper()}_CLIENT_SECRET")):
+        flash(f"{provider.title()} sign-in is not configured yet. See the SSO setup in README.md.", "error")
+        return redirect(url_for("student_login"))
+    client = oauth.create_client(provider)
+    callback = url_for("student_login_callback", provider=provider, _external=True)
+    return client.authorize_redirect(callback)
+
+
+@app.route("/student-login/<provider>/callback")
+def student_login_callback(provider):
+    if provider not in {"google", "microsoft"} or oauth is None:
+        return redirect(url_for("student_login"))
+    try:
+        token = oauth.create_client(provider).authorize_access_token()
+        claims = token.get("userinfo") or {}
+    except Exception:
+        app.logger.exception("Student SSO callback failed")
+        flash("Sign-in could not be verified. Please try again or contact the project administrator.", "error")
+        return redirect(url_for("student_login"))
+
+    email = (claims.get("email") or claims.get("preferred_username") or "").strip().lower()
+    if "@" not in email or email.rsplit("@", 1)[1] != STUDENT_EMAIL_DOMAIN:
+        flash(f"Use your college account ending in @{STUDENT_EMAIL_DOMAIN}.", "error")
+        return redirect(url_for("student_login"))
+    if provider == "google" and claims.get("email_verified") is not True:
+        flash("Google did not confirm that this email address is verified.", "error")
+        return redirect(url_for("student_login"))
+
+    session.clear()
+    session["student_profile"] = {
+        "name": claims.get("name") or email.split("@", 1)[0],
+        "college_email": email,
+        "provider": provider,
+        "verified": True,
+    }
+    flash("College account verified successfully.", "success")
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/student-logout", methods=["POST"])
+def student_logout():
+    session.clear()
+    flash("Student account signed out.", "success")
+    return redirect(url_for("student_login"))
 
 
 @app.route("/spaces", methods=["GET", "POST"])
@@ -268,17 +669,16 @@ def manage_spaces():
         name = request.form.get("name", "").strip()
         kind = request.form.get("kind", "")
         location = request.form.get("location", "").strip()
-        capacity = request.form.get("capacity", type=int)
         computer_count = request.form.get("computer_count", default=0, type=int)
         if (not name or len(name) > 80 or not location or len(location) > 120
-                or kind not in {"classroom", "lab"} or capacity is None or not 0 <= capacity <= 500
+                or kind not in {"classroom", "lab"}
                 or computer_count is None or not 0 <= computer_count <= 200
                 or (kind == "classroom" and computer_count != 0)):
-            flash("Enter a name, location, valid type and capacity. Labs can have up to 200 computers.", "error")
+            flash("Enter a name and location, choose a valid type, and set a valid computer count for labs.", "error")
         else:
             try:
                 cursor = db.execute("INSERT INTO spaces(name,kind,location,capacity) VALUES(?,?,?,?)",
-                                    (name, kind, location, capacity))
+                                    (name, kind, location, 0))
                 space_id = cursor.lastrowid
                 if kind == "lab":
                     db.executemany("INSERT INTO computers(space_id,name,status) VALUES(?,?,?)",
@@ -380,7 +780,8 @@ def observations():
         available = request.form.get("was_available") == "1"
         try:
             date.fromisoformat(observed_on)
-            if slot not in {"09:00", "11:00", "13:00", "15:00"}:
+            parsed_slot = datetime.strptime(slot, "%H:%M").time()
+            if not datetime.strptime("07:00", "%H:%M").time() <= parsed_slot <= datetime.strptime("22:00", "%H:%M").time():
                 raise ValueError
             db.execute("INSERT INTO observations(space_id,observed_on,time_slot,was_available) VALUES(?,?,?,?)",
                        (space_id, observed_on, slot, int(available)))
@@ -393,9 +794,9 @@ def observations():
     recent = db.execute("""SELECT o.*,s.name AS space_name FROM observations o JOIN spaces s ON s.id=o.space_id
         ORDER BY o.observed_on DESC,o.id DESC LIMIT 15""").fetchall()
     return render_template("observations.html", spaces=spaces, recent=recent,
-                           today=date.today().isoformat(), timeslots=["09:00", "11:00", "13:00", "15:00"])
+                           today=date.today().isoformat())
 
 
 if __name__ == "__main__":
     initialize_database()
-    app.run(debug=True)
+    app.run(debug=False)

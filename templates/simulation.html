@@ -1,0 +1,30 @@
+{% extends 'base.html' %}{% block title %}Lab simulator{% endblock %}{% block content %}
+<section class="page-title"><p class="eyebrow">DISCRETE EVENT MODEL</p><h1>Lab demand simulator</h1><p>Explore how requests might queue for the computers currently reported free at a lab and time.</p></section>
+<section class="content-card simulation-card">
+  <form method="post" class="simulation-form">
+    <label>Lab<select name="lab_id" required>{% for lab in labs %}<option value="{{ lab.id }}" {% if selected_lab and lab.id==selected_lab.id %}selected{% endif %}>{{ lab.name }}</option>{% endfor %}</select></label>
+    <label>Day<select name="weekday">{% for day in range(7) %}<option value="{{ day }}" {% if values.weekday==day %}selected{% endif %}>{{ weekdays[day] }}</option>{% endfor %}</select></label>
+    <label>Time<input type="time" name="slot" value="{{ values.slot }}" min="07:00" max="22:00" required></label>
+    <label>Student arrivals per hour<input type="number" name="arrivals_per_hour" min="1" max="60" value="{{ values.arrivals_per_hour }}" required></label>
+    <label>Average computer-use time (minutes)<input type="number" name="average_session_minutes" min="5" max="180" value="{{ values.average_session_minutes }}" required></label>
+    <label>Simulate for (minutes)<input type="number" name="simulation_minutes" min="30" max="240" value="{{ values.simulation_minutes }}" required></label>
+    <label>Repeated runs<input type="number" name="replications" min="10" max="200" value="{{ values.replications }}" required></label>
+    <button class="button" {% if not labs %}disabled{% endif %}>Run simulation →</button>
+  </form>
+  {% if selected_lab %}<p class="simulation-capacity"><strong>Inputs from the app:</strong> {{ selected_lab.name }} reports {{ capacity }} free computer{{ '' if capacity==1 else 's' }} at {{ values.slot }} on {{ weekdays[values.weekday] if values.weekday is not none and 0<=values.weekday<7 else 'selected day' }}. A scheduled class makes the simulated capacity zero.</p>{% endif %}
+  {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+  {% if analysis %}
+    <div class="simulation-results"><p class="eyebrow">AVERAGE ACROSS {{ analysis.replications }} SIMULATED RUNS</p><div class="simulation-metrics">
+      <div><small>Requests arriving</small><strong>{{ analysis.average_requests|round(1) }}</strong></div>
+      <div><small>Average wait</small><strong>{{ analysis.average_wait|round(1) }} min</strong></div>
+      <div><small>Requests that queued</small><strong>{{ (analysis.queue_rate*100)|round|int }}%</strong></div>
+      <div><small>95th-percentile longest wait per run</small><strong>{{ analysis.p95_wait|round(1) }} min</strong></div>
+    </div></div>
+  {% endif %}
+</section>
+<section class="content-card concept-card"><h2>What each library does here</h2><ul>
+  <li><strong>NumPy:</strong> generates random gaps between student arrivals and computer-use durations using an exponential distribution.</li>
+  <li><strong>SimPy:</strong> advances a simulated clock and treats each available computer as a shared resource students may wait to use.</li>
+  <li><strong>pandas:</strong> groups the repeated simulation results and summarizes the average and 95th-percentile measures. It also groups saved observations for the dashboard’s historical probability.</li>
+</ul><p class="footnote">This is a what-if model, not a live forecast. Arrival rates and session durations are assumptions entered above; use real campus observations to calibrate them. It does not change the database or reserve computers.</p></section>
+{% endblock %}

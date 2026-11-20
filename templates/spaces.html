@@ -4,13 +4,12 @@
   <label>Space name<input name="name" type="text" maxlength="80" placeholder="e.g. Room A105" required></label>
   <label>Type<select name="kind" id="space-kind"><option value="classroom">Classroom</option><option value="lab">Computer lab</option></select></label>
   <label>Location<input name="location" type="text" maxlength="120" placeholder="e.g. Block A · 1st floor" required></label>
-  <label>Capacity<input name="capacity" type="number" min="0" max="500" value="30" required></label>
-  <label>Computers in lab<input name="computer_count" type="number" min="0" max="200" value="0" required><small>For classrooms, leave at 0. Lab computers start with status Available.</small></label>
+  <label>Number of computers<input name="computer_count" type="number" min="0" max="200" value="0" required><small>For a classroom, enter 0. For a lab, enter the number of computers to register. They start as available.</small></label>
   <button class="button">Add space →</button>
 </form></section>
 <section class="section-heading" style="margin-top:28px"><div><p class="eyebrow">REGISTERED LOCATIONS</p><h2>Spaces in the database</h2></div></section>
-<div class="table-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Location</th><th>Capacity</th><th>Computers</th></tr></thead><tbody>
-{% for space in spaces %}<tr><td>{{ space.name }}</td><td>{{ space.kind|title }}</td><td>{{ space.location }}</td><td>{{ space.capacity }}</td><td>{{ space.computer_count if space.kind=='lab' else '—' }}</td></tr>{% endfor %}
+<div class="table-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Location</th><th>Computers</th></tr></thead><tbody>
+{% for space in spaces %}<tr><td>{{ space.name }}</td><td>{{ space.kind|title }}</td><td>{{ space.location }}</td><td>{{ space.computer_count if space.kind=='lab' else '—' }}</td></tr>{% endfor %}
 </tbody></table></div>
-<p class="footnote">A lab and its computers are linked by the computer table’s <code>space_id</code> foreign key. Adding a lab and its computers together keeps that relation valid.</p>
+<p class="footnote">Adding a lab registers its computers in the database with Available status. Classrooms do not need computer records.</p>
 {% endblock %}
